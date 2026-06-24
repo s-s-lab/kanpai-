@@ -1,0 +1,1666 @@
+<script>
+let currentEventData = null;
+let selectedSlotDates = [];
+let currentAdminKey = '';
+let currentSettlementSummary = null;
+
+let currentParticipantEdit = {
+  participantId: '',
+  editKey: ''
+};
+
+document.addEventListener('DOMContentLoaded', function () {
+  initializeApp();
+});
+
+
+function initializeApp() {
+  showMessage('アプリを初期化しています。', 'info');
+
+  renderSelectedDateList();
+  addStationShopRow();
+
+  callServer('setupSheets')
+    .then(function () {
+      hideMessage();
+      renderLocalHistory();
+
+      if (window.APP_INITIAL_PARTICIPANT_ID && window.APP_INITIAL_EDIT_KEY) {
+        currentParticipantEdit.participantId = window.APP_INITIAL_PARTICIPANT_ID;
+        currentParticipantEdit.editKey = window.APP_INITIAL_EDIT_KEY;
+      }
+
+      if (window.APP_INITIAL_EVENT_ID) {
+        loadEvent(window.APP_INITIAL_EVENT_ID);
+      }
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function callServer(functionName) {
+  showLoading(true);
+
+  const args = Array.prototype.slice.call(arguments, 1);
+
+  return new Promise(function (resolve, reject) {
+    google.script.run
+      .withSuccessHandler(function (result) {
+        showLoading(false);
+        resolve(result);
+      })
+      .withFailureHandler(function (error) {
+        showLoading(false);
+        reject(error);
+      })[functionName].apply(google.script.run, args);
+  });
+}
+
+
+function addSlotDate() {
+  const dateInput = document.getElementById('slotDateInput');
+
+  if (!dateInput) {
+    showMessage('日付入力欄が見つかりません。', 'error');
+    return;
+  }
+
+  const date = dateInput.value;
+
+  if (!date) {
+    showMessage('追加する日付を選択してください。', 'error');
+    return;
+  }
+
+  if (selectedSlotDates.indexOf(date) >= 0) {
+    showMessage('同じ日付はすでに追加されています。', 'error');
+    return;
+  }
+
+  selectedSlotDates.push(date);
+  selectedSlotDates.sort();
+
+  dateInput.value = '';
+  renderSelectedDateList();
+}
+
+
+function removeSlotDate(date) {
+  selectedSlotDates = selectedSlotDates.filter(function (item) {
+    return item !== date;
+  });
+
+  renderSelectedDateList();
+}
+
+
+function renderSelectedDateList() {
+  const area = document.getElementById('selectedDateList');
+  if (!area) return;
+
+  if (selectedSlotDates.length === 0) {
+    area.innerHTML = '<div class="empty">候補日程はまだ追加されていません。</div>';
+    return;
+  }
+
+  const startTime = getValue('defaultStartTime') || '開始時刻未設定';
+  const endTime = getValue('defaultEndTime') || '終了時刻未設定';
+
+  let html = '';
+
+  selectedSlotDates.forEach(function (date) {
+    html +=
+      '<div class="selected-date-item">' +
+        '<div>' +
+          '<strong>' + escapeHtml(formatDateForDisplay(date)) + '</strong>' +
+          '<div class="small">' + escapeHtml(startTime) + ' 〜 ' + escapeHtml(endTime) + '</div>' +
+        '</div>' +
+        '<button type="button" class="danger" onclick="removeSlotDate(\'' + escapeForJs(date) + '\')">削除</button>' +
+      '</div>';
+  });
+
+  area.innerHTML = html;
+}
+
+
+document.addEventListener('input', function (event) {
+  if (event.target && (event.target.id === 'defaultStartTime' || event.target.id === 'defaultEndTime')) {
+    renderSelectedDateList();
+  }
+});
+
+
+function addStationShopRow(stationValue, urlValue) {
+  const area = document.getElementById('stationShopRows');
+
+  if (!area) return;
+
+  const rowId = 'stationShopRow-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'station-shop-row';
+  wrapper.id = rowId;
+
+  wrapper.innerHTML =
+    '<div>' +
+      '<label>最寄り駅</label>' +
+      '<input type="text" class="station-input" placeholder="例：渋谷" value="' + escapeAttribute(stationValue || '') + '">' +
+    '</div>' +
+    '<div>' +
+      '<label>お店URL</label>' +
+      '<input type="url" class="shop-url-input" placeholder="例：https://example.com" value="' + escapeAttribute(urlValue || '') + '">' +
+    '</div>' +
+    '<div>' +
+      '<button type="button" class="danger" onclick="removeStationShopRow(\'' + escapeForJs(rowId) + '\')">削除</button>' +
+    '</div>';
+
+  area.appendChild(wrapper);
+}
+
+
+function removeStationShopRow(rowId) {
+  const row = document.getElementById(rowId);
+
+  if (row) {
+    row.remove();
+  }
+
+  const rows = document.querySelectorAll('.station-shop-row');
+
+  if (rows.length === 0) {
+    addStationShopRow();
+  }
+}
+
+
+function getStationShopOptions() {
+  const rows = document.querySelectorAll('.station-shop-row');
+  const options = [];
+
+  rows.forEach(function (row) {
+    const stationInput = row.querySelector('.station-input');
+    const urlInput = row.querySelector('.shop-url-input');
+
+    const station = stationInput ? stationInput.value.trim() : '';
+    const url = urlInput ? urlInput.value.trim() : '';
+
+    if (station) {
+      options.push({
+        station: station,
+        url: url
+      });
+    }
+  });
+
+  return options;
+}
+
+
+function handleCreateEvent(event) {
+  event.preventDefault();
+
+  const data = {
+    eventName: getValue('eventName'),
+    organizerName: getValue('organizerName'),
+    description: getValue('description'),
+    defaultStartTime: getValue('defaultStartTime'),
+    defaultEndTime: getValue('defaultEndTime'),
+    slotDates: selectedSlotDates,
+    stationShopOptions: getStationShopOptions(),
+    memo: getValue('memo')
+  };
+
+  if (!data.eventName) {
+    showMessage('イベント名を入力してください。', 'error');
+    return;
+  }
+
+  if (!data.organizerName) {
+    showMessage('幹事名を入力してください。', 'error');
+    return;
+  }
+
+  if (!data.defaultStartTime || !data.defaultEndTime) {
+    showMessage('開始予定時刻と終了予定時刻を入力してください。', 'error');
+    return;
+  }
+
+  if (selectedSlotDates.length === 0) {
+    showMessage('候補日程を1件以上追加してください。', 'error');
+    return;
+  }
+
+  callServer('createEvent', data)
+    .then(function (result) {
+      if (!result || !result.eventId) {
+        showMessage('イベント作成結果の取得に失敗しました。', 'error');
+        return;
+      }
+
+      renderCreateResult(result);
+      saveLocalHistory(result);
+      renderLocalHistory();
+      resetCreateForm();
+
+      showMessage('イベントを作成しました。イベントページへ移動します。', 'success');
+
+      setTimeout(function () {
+        loadEvent(result.eventId);
+      }, 1000);
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function resetCreateForm() {
+  const form = document.getElementById('createEventForm');
+  if (form) form.reset();
+
+  setValue('defaultStartTime', '19:00');
+  setValue('defaultEndTime', '21:00');
+
+  selectedSlotDates = [];
+  renderSelectedDateList();
+
+  const area = document.getElementById('stationShopRows');
+  if (area) {
+    area.innerHTML = '';
+    addStationShopRow();
+  }
+}
+
+
+function renderCreateResult(result) {
+  const box = document.getElementById('createResult');
+  if (!box) return;
+
+  box.style.display = 'block';
+
+  box.innerHTML =
+    '<h3>イベントを作成しました</h3>' +
+    '<div class="result-item"><strong>イベントID</strong><span>' + escapeHtml(result.eventId) + '</span></div>' +
+    '<div class="result-item"><strong>管理キー</strong><span>' + escapeHtml(result.adminKey) + '</span></div>' +
+    '<div class="message info show">管理キーは幹事用の編集に必要です。必ずメモしてください。</div>' +
+    '<div class="result-item"><strong>参加者用URL</strong><a href="' + escapeAttribute(result.participantUrl) + '" target="_top">' + escapeHtml(result.participantUrl) + '</a></div>' +
+    '<div class="result-item"><strong>幹事用管理URL</strong><a href="' + escapeAttribute(result.adminUrl) + '" target="_top">' + escapeHtml(result.adminUrl) + '</a></div>' +
+    '<div class="button-row">' +
+      '<button type="button" onclick="copyText(\'' + escapeForJs(result.participantUrl) + '\')">参加者用URLをコピー</button>' +
+      '<button type="button" class="secondary" onclick="copyText(\'' + escapeForJs(result.adminKey) + '\')">管理キーをコピー</button>' +
+      '<button type="button" class="ghost" onclick="loadEvent(\'' + escapeForJs(result.eventId) + '\')">イベントページを開く</button>' +
+    '</div>';
+}
+
+
+function goToEventById() {
+  const eventId = getValue('eventIdInput');
+
+  if (!eventId) {
+    showMessage('イベントIDを入力してください。', 'error');
+    return;
+  }
+
+  currentParticipantEdit = {
+    participantId: '',
+    editKey: ''
+  };
+
+  loadEvent(eventId);
+}
+
+
+function loadEvent(eventId) {
+  if (!eventId) {
+    showMessage('イベントIDが指定されていません。', 'error');
+    return;
+  }
+
+  callServer('getEventDataForClient', eventId)
+    .then(function (data) {
+      if (!data || !data.event) {
+        showMessage('イベント情報の取得に失敗しました。', 'error');
+        return;
+      }
+
+      currentEventData = data;
+      renderEventPage(data);
+      showMessage('イベントページを表示しました。', 'success');
+
+      if (currentParticipantEdit.participantId && currentParticipantEdit.editKey) {
+        switchTab('schedule');
+        loadParticipantForEdit(currentParticipantEdit.participantId, currentParticipantEdit.editKey);
+      }
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderEventPage(data) {
+  const event = data.event;
+
+  setDisplay('topView', 'none');
+  setDisplay('eventView', 'block');
+
+  setText('eventTitle', event.eventName || '');
+  setHtml('eventStatus', '<span class="status-pill">' + escapeHtml(event.status || '調整中') + '</span>');
+  setText('eventDescription', event.description || '');
+
+  renderOverview(data);
+  renderScheduleTab(data);
+  renderVoteTab(data);
+  renderDecisionTab(data);
+  renderSettlementTab(data);
+  renderAdminTab(data);
+
+  switchTab('overview');
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+
+function renderOverview(data) {
+  const event = data.event;
+  const slots = data.slots || [];
+  const stationOptions = data.stationOptions || [];
+
+  const overview = document.getElementById('overviewContent');
+  if (!overview) return;
+
+  overview.innerHTML =
+    '<div class="result-box">' +
+      '<div class="result-item"><strong>イベントID</strong><span>' + escapeHtml(event.eventId) + '</span></div>' +
+      '<div class="result-item"><strong>幹事</strong><span>' + escapeHtml(event.organizerName || '') + '</span></div>' +
+      '<div class="result-item"><strong>予定時間</strong><span>' + escapeHtml(event.defaultStartTime || '未設定') + ' 〜 ' + escapeHtml(event.defaultEndTime || '未設定') + '</span></div>' +
+      '<div class="result-item"><strong>備考</strong><span>' + escapeHtml(event.finalMemo || 'なし') + '</span></div>' +
+    '</div>' +
+    '<h3>候補日程</h3>' +
+    renderSlotList(slots) +
+    '<h3>最寄り駅・お店URL候補</h3>' +
+    renderStationShopList(stationOptions);
+}
+
+
+function renderSlotList(slots) {
+  if (!slots || slots.length === 0) {
+    return '<div class="empty">候補日程は登録されていません。</div>';
+  }
+
+  let html = '<div class="list">';
+
+  slots.forEach(function (slot) {
+    html +=
+      '<div class="list-item">' +
+        '<div class="list-item-title">' + escapeHtml(formatDateForDisplay(slot.date || '')) + '</div>' +
+        '<div class="list-item-meta">' + escapeHtml(slot.startTime || '') + (slot.endTime ? '〜 ' + escapeHtml(slot.endTime) : '') + '</div>' +
+      '</div>';
+  });
+
+  html += '</div>';
+
+  return html;
+}
+
+
+function renderStationShopList(options) {
+  if (!options || options.length === 0) {
+    return '<div class="empty">最寄り駅・お店URL候補は登録されていません。</div>';
+  }
+
+  let html = '<div class="list">';
+
+  options.forEach(function (option) {
+    const urlHtml = option.url
+      ? '<div class="list-item-meta"><a href="' + escapeAttribute(option.url) + '" target="_blank">お店URLを開く</a></div>'
+      : '<div class="list-item-meta">お店URL：未登録</div>';
+
+    html +=
+      '<div class="list-item">' +
+        '<div class="list-item-title">' + escapeHtml(option.name || option.station || '') + '</div>' +
+        urlHtml +
+      '</div>';
+  });
+
+  html += '</div>';
+
+  return html;
+}
+
+
+function renderScheduleTab(data) {
+  const area = document.getElementById('scheduleContent');
+  if (!area) return;
+
+  const slots = data.slots || [];
+
+  if (slots.length === 0) {
+    area.innerHTML = '<div class="empty">候補日程が登録されていません。</div>';
+    return;
+  }
+
+  let slotHtml = '';
+
+  slots.forEach(function (slot) {
+    slotHtml += renderScheduleAnswerItem(slot);
+  });
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>あなたの予定を回答する</h3>' +
+      '<p class="lead">名前を入力し、各日程について参加可否を選択してください。</p>' +
+      '<label for="participantName">参加者名 <span class="small">必須</span></label>' +
+      '<input id="participantName" type="text" placeholder="例：鈴田">' +
+      '<label for="participantComment">全体コメント</label>' +
+      '<textarea id="participantComment" placeholder="例：遅れる可能性があります。"></textarea>' +
+      '<h3>候補日程ごとの回答</h3>' +
+      '<div class="list">' + slotHtml + '</div>' +
+      '<div class="button-row">' +
+        '<button type="button" onclick="submitScheduleResponse()">回答を登録する</button>' +
+        '<button type="button" class="ghost" onclick="clearParticipantEditMode()">新しい回答として入力する</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="participantEditResult"></div>' +
+    '<h3>回答状況</h3>' +
+    '<div id="scheduleSummaryArea"><div class="empty">回答状況を読み込みます。</div></div>';
+
+  refreshScheduleSummary();
+}
+
+
+function renderScheduleAnswerItem(slot) {
+  const slotId = String(slot.slotId || '');
+
+  return (
+    '<div class="list-item">' +
+      '<div class="list-item-title">' + escapeHtml(formatDateForDisplay(slot.date || '')) + '</div>' +
+      '<div class="list-item-meta">' + escapeHtml(slot.startTime || '') + (slot.endTime ? '〜 ' + escapeHtml(slot.endTime) : '') + '</div>' +
+      '<label for="status-' + escapeAttribute(slotId) + '">参加可否</label>' +
+      '<select id="status-' + escapeAttribute(slotId) + '">' +
+        '<option value="参加可">参加可</option>' +
+        '<option value="未定" selected>未定</option>' +
+        '<option value="不参加">不参加</option>' +
+      '</select>' +
+      '<div class="form-row">' +
+        '<div><label for="join-' + escapeAttribute(slotId) + '">途中参加時刻</label><input id="join-' + escapeAttribute(slotId) + '" type="time"></div>' +
+        '<div><label for="leave-' + escapeAttribute(slotId) + '">途中退席時刻</label><input id="leave-' + escapeAttribute(slotId) + '" type="time"></div>' +
+      '</div>' +
+      '<label for="note-' + escapeAttribute(slotId) + '">この日程のメモ</label>' +
+      '<input id="note-' + escapeAttribute(slotId) + '" type="text" placeholder="例：20時から参加できます">' +
+    '</div>'
+  );
+}
+
+
+function submitScheduleResponse() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  const name = getValue('participantName');
+  const comment = getValue('participantComment');
+
+  if (!name) {
+    showMessage('参加者名を入力してください。', 'error');
+    return;
+  }
+
+  const answers = (currentEventData.slots || []).map(function (slot) {
+    const slotId = String(slot.slotId || '');
+
+    return {
+      slotId: slotId,
+      status: getValue('status-' + slotId) || '未定',
+      joinTime: getValue('join-' + slotId),
+      leaveTime: getValue('leave-' + slotId),
+      note: getValue('note-' + slotId)
+    };
+  });
+
+  const data = {
+    eventId: currentEventData.event.eventId,
+    participantId: currentParticipantEdit.participantId,
+    editKey: currentParticipantEdit.editKey,
+    name: name,
+    comment: comment,
+    answers: answers
+  };
+
+  callServer('addOrUpdateParticipantResponse', data)
+    .then(function (result) {
+      currentParticipantEdit.participantId = result.participantId;
+      currentParticipantEdit.editKey = result.editKey;
+
+      renderParticipantEditResult(result);
+      renderScheduleSummary(result.summary);
+
+      setValue('voteParticipantName', name);
+
+      showMessage(result.message || '回答を保存しました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderParticipantEditResult(result) {
+  const area = document.getElementById('participantEditResult');
+  if (!area) return;
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>' + (result.isUpdate ? '回答を更新しました' : '回答を登録しました') + '</h3>' +
+      '<div class="message info show">このURLまたは編集キーを使うと、後から自分の回答や投票を修正できます。</div>' +
+      '<div class="result-item"><strong>編集キー</strong><span>' + escapeHtml(result.editKey) + '</span></div>' +
+      '<div class="result-item"><strong>編集URL</strong><a href="' + escapeAttribute(result.editUrl) + '" target="_top">' + escapeHtml(result.editUrl) + '</a></div>' +
+      '<div class="button-row">' +
+        '<button type="button" onclick="copyText(\'' + escapeForJs(result.editUrl) + '\')">編集URLをコピー</button>' +
+        '<button type="button" class="secondary" onclick="copyText(\'' + escapeForJs(result.editKey) + '\')">編集キーをコピー</button>' +
+      '</div>' +
+    '</div>';
+}
+
+
+function loadParticipantForEdit(participantId, editKey) {
+  if (!currentEventData || !currentEventData.event) return;
+
+  callServer('getParticipantResponse', currentEventData.event.eventId, participantId, editKey)
+    .then(function (result) {
+      const participant = result.participant;
+      const availabilities = result.availabilities || [];
+
+      setValue('participantName', participant.name || '');
+      setValue('participantComment', participant.comment || '');
+      setValue('voteParticipantName', participant.name || '');
+
+      availabilities.forEach(function (availability) {
+        const slotId = String(availability.slotId || '');
+
+        setValue('status-' + slotId, availability.status || '未定');
+        setValue('join-' + slotId, availability.joinTime || '');
+        setValue('leave-' + slotId, availability.leaveTime || '');
+        setValue('note-' + slotId, availability.note || '');
+      });
+
+      loadParticipantVotesForEdit(participantId, editKey);
+
+      showMessage('回答を編集モードで読み込みました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function loadParticipantVotesForEdit(participantId, editKey) {
+  if (!currentEventData || !currentEventData.event) return;
+
+  callServer('getParticipantVotes', currentEventData.event.eventId, participantId, editKey)
+    .then(function (result) {
+      const votes = result.votes || [];
+
+      votes.forEach(function (vote) {
+        setValue('vote-' + String(vote.optionId || ''), vote.voteValue || '');
+      });
+    })
+    .catch(function (error) {
+      console.error(error);
+    });
+}
+
+
+function clearParticipantEditMode() {
+  currentParticipantEdit = {
+    participantId: '',
+    editKey: ''
+  };
+
+  setValue('participantName', '');
+  setValue('participantComment', '');
+  setValue('voteParticipantName', '');
+
+  if (currentEventData && currentEventData.slots) {
+    currentEventData.slots.forEach(function (slot) {
+      const slotId = String(slot.slotId || '');
+
+      setValue('status-' + slotId, '未定');
+      setValue('join-' + slotId, '');
+      setValue('leave-' + slotId, '');
+      setValue('note-' + slotId, '');
+    });
+  }
+
+  clearVoteInputs(false);
+
+  setHtml('participantEditResult', '');
+  setHtml('voteEditResult', '');
+
+  showMessage('新しい回答として入力できます。', 'success');
+}
+
+
+function refreshScheduleSummary() {
+  if (!currentEventData || !currentEventData.event) return;
+
+  callServer('getScheduleSummary', currentEventData.event.eventId)
+    .then(function (summary) {
+      renderScheduleSummary(summary);
+    })
+    .catch(function () {
+      setHtml('scheduleSummaryArea', '<div class="empty">回答状況の取得に失敗しました。</div>');
+    });
+}
+
+
+function renderScheduleSummary(summaryData) {
+  const area = document.getElementById('scheduleSummaryArea');
+  if (!area) return;
+
+  const summary = summaryData && summaryData.summary ? summaryData.summary : [];
+  const totalParticipants = Number(summaryData.totalParticipants || 0);
+
+  let html =
+    '<div class="result-box"><div class="result-item"><strong>回答者数</strong><span>' + totalParticipants + '人</span></div></div>' +
+    '<div class="list">';
+
+  summary.forEach(function (item) {
+    html += renderScheduleSummaryItem(item);
+  });
+
+  html += '</div>';
+
+  area.innerHTML = html;
+}
+
+
+function renderScheduleSummaryItem(item) {
+  const counts = item.counts || {};
+  const responses = item.responses || [];
+
+  let responseHtml = '';
+
+  if (responses.length === 0) {
+    responseHtml = '<div class="empty">まだ回答がありません。</div>';
+  } else {
+    responses.forEach(function (response) {
+      const detailParts = [];
+
+      if (response.joinTime) detailParts.push('途中参加：' + escapeHtml(response.joinTime));
+      if (response.leaveTime) detailParts.push('途中退席：' + escapeHtml(response.leaveTime));
+      if (response.note) detailParts.push('メモ：' + escapeHtml(response.note));
+
+      responseHtml +=
+        '<div class="list-item-meta">' +
+          escapeHtml(response.name) + '：' + escapeHtml(response.status) +
+          (detailParts.length ? ' ／ ' + detailParts.join(' ／ ') : '') +
+        '</div>';
+    });
+  }
+
+  return (
+    '<div class="list-item">' +
+      '<div class="list-item-title">' + escapeHtml(formatDateForDisplay(item.date || '')) + '</div>' +
+      '<div class="list-item-meta">' + escapeHtml(item.startTime || '') + (item.endTime ? '〜 ' + escapeHtml(item.endTime) : '') + '</div>' +
+      '<div class="result-box" style="box-shadow:none; margin-top:10px;">' +
+        '<div class="result-item"><strong>集計</strong><span>参加可：' + Number(counts['参加可'] || 0) + '人　未定：' + Number(counts['未定'] || 0) + '人　不参加：' + Number(counts['不参加'] || 0) + '人</span></div>' +
+        '<div class="result-item"><strong>途中参加・途中退席</strong><span>途中参加：' + Number(item.joinCount || 0) + '人　途中退席：' + Number(item.leaveCount || 0) + '人</span></div>' +
+      '</div>' +
+      '<h3 style="font-size:15px; margin-top:12px;">回答者</h3>' +
+      responseHtml +
+    '</div>'
+  );
+}
+
+
+function renderVoteTab(data) {
+  const area = document.getElementById('voteContent');
+  if (!area) return;
+
+  const options = []
+    .concat(data.stationOptions || [])
+    .concat(data.shopOptions || []);
+
+  if (options.length === 0) {
+    area.innerHTML = '<div class="empty">投票できる候補が登録されていません。</div>';
+    return;
+  }
+
+  let optionHtml = '';
+
+  options.forEach(function (option) {
+    optionHtml += renderVoteOptionItem(option);
+  });
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>候補に投票する</h3>' +
+      '<p class="lead">最寄り駅やお店URL候補について、「よい・どちらでもよい・微妙」で投票できます。</p>' +
+      '<label for="voteParticipantName">投票者名 <span class="small">必須</span></label>' +
+      '<input id="voteParticipantName" type="text" placeholder="例：鈴田">' +
+      '<h3>候補ごとの投票</h3>' +
+      '<div class="list">' + optionHtml + '</div>' +
+      '<div class="button-row">' +
+        '<button type="button" onclick="submitVoteResponse()">投票を登録する</button>' +
+        '<button type="button" class="ghost" onclick="clearVoteInputs(true)">投票入力をクリア</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="voteEditResult"></div>' +
+    '<h3>投票結果</h3>' +
+    '<div id="voteSummaryArea"><div class="empty">投票結果を読み込みます。</div></div>';
+
+  refreshVoteSummary();
+}
+
+
+function renderVoteOptionItem(option) {
+  const optionId = String(option.optionId || '');
+
+  const urlHtml = option.url
+    ? '<div class="list-item-meta"><a href="' + escapeAttribute(option.url) + '" target="_blank">お店URLを開く</a></div>'
+    : '<div class="list-item-meta">お店URL：未登録</div>';
+
+  return (
+    '<div class="list-item">' +
+      '<div class="list-item-title">' + escapeHtml(option.name || option.station || '') + '</div>' +
+      urlHtml +
+      '<label for="vote-' + escapeAttribute(optionId) + '">投票</label>' +
+      '<select id="vote-' + escapeAttribute(optionId) + '" class="vote-select">' +
+        '<option value="">未回答</option>' +
+        '<option value="good">よい</option>' +
+        '<option value="ok">どちらでもよい</option>' +
+        '<option value="bad">微妙</option>' +
+      '</select>' +
+    '</div>'
+  );
+}
+
+
+function submitVoteResponse() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  const name = getValue('voteParticipantName') || getValue('participantName');
+
+  if (!name) {
+    showMessage('投票者名を入力してください。', 'error');
+    return;
+  }
+
+  const options = []
+    .concat(currentEventData.stationOptions || [])
+    .concat(currentEventData.shopOptions || []);
+
+  const votes = [];
+
+  options.forEach(function (option) {
+    const optionId = String(option.optionId || '');
+    const voteValue = getValue('vote-' + optionId);
+
+    if (optionId && voteValue) {
+      votes.push({
+        optionId: optionId,
+        voteValue: voteValue
+      });
+    }
+  });
+
+  if (votes.length === 0) {
+    showMessage('少なくとも1件は投票してください。', 'error');
+    return;
+  }
+
+  const data = {
+    eventId: currentEventData.event.eventId,
+    participantId: currentParticipantEdit.participantId,
+    editKey: currentParticipantEdit.editKey,
+    name: name,
+    votes: votes
+  };
+
+  callServer('addOrUpdateVoteResponse', data)
+    .then(function (result) {
+      currentParticipantEdit.participantId = result.participantId;
+      currentParticipantEdit.editKey = result.editKey;
+
+      setValue('participantName', name);
+
+      renderVoteEditResult(result);
+      renderVoteSummary(result.summary);
+
+      showMessage(result.message || '投票を保存しました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderVoteEditResult(result) {
+  const area = document.getElementById('voteEditResult');
+  if (!area) return;
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>' + (result.isUpdate ? '投票を更新しました' : '投票を登録しました') + '</h3>' +
+      '<div class="message info show">このURLまたは編集キーを使うと、後から自分の回答や投票を修正できます。</div>' +
+      '<div class="result-item"><strong>編集キー</strong><span>' + escapeHtml(result.editKey) + '</span></div>' +
+      '<div class="result-item"><strong>編集URL</strong><a href="' + escapeAttribute(result.editUrl) + '" target="_top">' + escapeHtml(result.editUrl) + '</a></div>' +
+    '</div>';
+}
+
+
+function clearVoteInputs(showNotice) {
+  document.querySelectorAll('.vote-select').forEach(function (select) {
+    select.value = '';
+  });
+
+  if (showNotice) {
+    showMessage('投票入力をクリアしました。', 'success');
+  }
+}
+
+
+function refreshVoteSummary() {
+  if (!currentEventData || !currentEventData.event) return;
+
+  callServer('getVoteSummary', currentEventData.event.eventId)
+    .then(function (summary) {
+      renderVoteSummary(summary);
+    })
+    .catch(function () {
+      setHtml('voteSummaryArea', '<div class="empty">投票結果の取得に失敗しました。</div>');
+    });
+}
+
+
+function renderVoteSummary(summaryData) {
+  const area = document.getElementById('voteSummaryArea');
+  if (!area) return;
+
+  const summary = summaryData && summaryData.summary ? summaryData.summary : [];
+  const totalVoters = Number(summaryData.totalVoters || 0);
+
+  let html =
+    '<div class="result-box"><div class="result-item"><strong>投票者数</strong><span>' + totalVoters + '人</span></div></div>' +
+    '<div class="list">';
+
+  summary.forEach(function (item) {
+    html += renderVoteSummaryItem(item);
+  });
+
+  html += '</div>';
+
+  area.innerHTML = html;
+}
+
+
+function renderVoteSummaryItem(item) {
+  const counts = item.counts || {};
+  const responses = item.responses || [];
+
+  const urlHtml = item.url
+    ? '<div class="list-item-meta"><a href="' + escapeAttribute(item.url) + '" target="_blank">お店URLを開く</a></div>'
+    : '<div class="list-item-meta">お店URL：未登録</div>';
+
+  let responseHtml = '';
+
+  if (responses.length === 0) {
+    responseHtml = '<div class="empty">まだ投票がありません。</div>';
+  } else {
+    responses.forEach(function (response) {
+      responseHtml += '<div class="list-item-meta">' + escapeHtml(response.name) + '：' + escapeHtml(labelVoteValue(response.voteValue)) + '</div>';
+    });
+  }
+
+  return (
+    '<div class="list-item">' +
+      '<div class="list-item-title">' + escapeHtml(item.name || item.station || '') + ' <span class="score-pill">スコア ' + Number(item.score || 0) + '</span></div>' +
+      urlHtml +
+      '<div class="result-box" style="box-shadow:none; margin-top:10px;">' +
+        '<div class="result-item"><strong>集計</strong><span>よい：' + Number(counts.good || 0) + '人　どちらでもよい：' + Number(counts.ok || 0) + '人　微妙：' + Number(counts.bad || 0) + '人</span></div>' +
+      '</div>' +
+      '<h3 style="font-size:15px; margin-top:12px;">投票者</h3>' +
+      responseHtml +
+    '</div>'
+  );
+}
+
+
+function labelVoteValue(value) {
+  if (value === 'good') return 'よい';
+  if (value === 'ok') return 'どちらでもよい';
+  if (value === 'bad') return '微妙';
+  return '未回答';
+}
+
+
+function renderDecisionTab(data) {
+  const area = document.getElementById('decisionContent');
+  if (!area) return;
+
+  const event = data.event;
+
+  if (!event.finalDateTime && !event.finalShopName && !event.finalStation && !event.finalShopUrl) {
+    area.innerHTML =
+      '<div class="empty">幹事による決定事項はまだ登録されていません。</div>';
+    return;
+  }
+
+  const shopUrlHtml = event.finalShopUrl
+    ? '<div class="result-item"><strong>お店URL</strong><a href="' + escapeAttribute(event.finalShopUrl) + '" target="_blank">' + escapeHtml(event.finalShopUrl) + '</a></div>'
+    : '<div class="result-item"><strong>お店URL</strong><span>未登録</span></div>';
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<div class="result-item"><strong>確定日時</strong><span>' + escapeHtml(event.finalDateTime || '未登録') + '</span></div>' +
+      '<div class="result-item"><strong>最寄り駅</strong><span>' + escapeHtml(event.finalStation || '未登録') + '</span></div>' +
+      '<div class="result-item"><strong>お店</strong><span>' + escapeHtml(event.finalShopName || '未登録') + '</span></div>' +
+      shopUrlHtml +
+      '<div class="result-item"><strong>集合場所</strong><span>' + escapeHtml(event.finalMeetingPlace || '未登録') + '</span></div>' +
+      '<div class="result-item"><strong>会費目安</strong><span>' + escapeHtml(event.finalFee || '未登録') + '</span></div>' +
+      '<div class="result-item"><strong>幹事メモ</strong><span>' + escapeHtml(event.finalMemo || 'なし') + '</span></div>' +
+    '</div>';
+}
+
+
+function renderSettlementTab(data) {
+  const area = document.getElementById('settlementContent');
+  if (!area) return;
+
+  area.innerHTML =
+    '<div id="settlementSummaryArea"><div class="empty">精算状況を読み込みます。</div></div>' +
+    '<div id="settlementAdminArea"></div>';
+
+  refreshSettlementSummary();
+}
+
+
+function refreshSettlementSummary() {
+  if (!currentEventData || !currentEventData.event) return;
+
+  callServer('getSettlementSummary', currentEventData.event.eventId)
+    .then(function (summary) {
+      currentSettlementSummary = summary;
+      renderSettlementSummary(summary);
+      renderSettlementAdminArea(summary);
+    })
+    .catch(function () {
+      setHtml('settlementSummaryArea', '<div class="empty">精算状況の取得に失敗しました。</div>');
+    });
+}
+
+
+function renderSettlementSummary(summaryData) {
+  const area = document.getElementById('settlementSummaryArea');
+  if (!area) return;
+
+  const items = summaryData && summaryData.items ? summaryData.items : [];
+  const counts = summaryData && summaryData.counts ? summaryData.counts : {};
+
+  if (items.length === 0) {
+    area.innerHTML =
+      '<div class="empty">精算対象の参加者がまだ登録されていません。日程回答または投票を行った参加者が表示されます。</div>';
+    return;
+  }
+
+  let html =
+    '<div class="result-box">' +
+      '<h3>精算状況</h3>' +
+      '<div class="result-item"><strong>対象者数</strong><span>' + Number(counts.total || 0) + '人</span></div>' +
+      '<div class="result-item"><strong>進捗</strong><span>' +
+        '支払済み：' + Number(counts.paid || 0) + '人　' +
+        '未払い：' + Number(counts.unpaid || 0) + '人　' +
+        '一部支払：' + Number(counts.partial || 0) + '人　' +
+        '支払不要：' + Number(counts.unnecessary || 0) + '人　' +
+        '未設定：' + Number(counts.unset || 0) + '人' +
+      '</span></div>' +
+    '</div>' +
+    '<div class="list">';
+
+  items.forEach(function (item) {
+    html +=
+      '<div class="list-item">' +
+        '<div class="list-item-title">' + escapeHtml(item.name || '名前未登録') + ' <span class="settlement-pill">' + escapeHtml(item.paymentStatus || '未設定') + '</span></div>' +
+        '<div class="list-item-meta">金額：' + escapeHtml(item.amount || '未設定') + '</div>' +
+        '<div class="list-item-meta">支払方法：' + escapeHtml(item.paymentMethod || '未設定') + '</div>' +
+        '<div class="list-item-meta">メモ：' + escapeHtml(item.note || 'なし') + '</div>' +
+        '<div class="list-item-meta">更新日時：' + escapeHtml(item.updatedAt || '未更新') + '</div>' +
+      '</div>';
+  });
+
+  html += '</div>';
+
+  area.innerHTML = html;
+}
+
+
+function renderSettlementAdminArea(summaryData) {
+  const area = document.getElementById('settlementAdminArea');
+  if (!area) return;
+
+  if (!currentAdminKey) {
+    area.innerHTML =
+      '<div class="result-box">' +
+        '<h3>幹事用：精算情報を編集する</h3>' +
+        '<p class="lead">管理キーを入力すると、参加者ごとの金額・支払状況を編集できます。</p>' +
+        '<label for="settlementAdminKeyInput">管理キー</label>' +
+        '<input id="settlementAdminKeyInput" type="text" placeholder="ADM-XXXXXXXXXXXX">' +
+        '<div class="button-row">' +
+          '<button type="button" onclick="unlockSettlementAdmin()">精算管理を開く</button>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
+
+  renderSettlementAdminForm(summaryData);
+}
+
+
+function unlockSettlementAdmin() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  const adminKey = getValue('settlementAdminKeyInput') || getValue('adminKeyInput');
+
+  if (!adminKey) {
+    showMessage('管理キーを入力してください。', 'error');
+    return;
+  }
+
+  callServer('verifyAdminKey', currentEventData.event.eventId, adminKey)
+    .then(function (result) {
+      if (!result || !result.ok) {
+        showMessage(result && result.message ? result.message : '管理キーが一致しません。', 'error');
+        return;
+      }
+
+      currentAdminKey = adminKey;
+      renderSettlementAdminArea(currentSettlementSummary);
+      showMessage('精算管理を開きました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderSettlementAdminForm(summaryData) {
+  const area = document.getElementById('settlementAdminArea');
+  if (!area) return;
+
+  const items = summaryData && summaryData.items ? summaryData.items : [];
+
+  if (items.length === 0) {
+    area.innerHTML =
+      '<div class="result-box">' +
+        '<h3>幹事用：精算情報を編集する</h3>' +
+        '<div class="empty">精算対象の参加者がまだいません。</div>' +
+      '</div>';
+    return;
+  }
+
+  let rowsHtml = '';
+
+  items.forEach(function (item) {
+    const participantId = String(item.participantId || '');
+
+    rowsHtml +=
+      '<div class="list-item">' +
+        '<div class="list-item-title">' + escapeHtml(item.name || '名前未登録') + '</div>' +
+
+        '<label for="settlementAmount-' + escapeAttribute(participantId) + '">支払金額</label>' +
+        '<input id="settlementAmount-' + escapeAttribute(participantId) + '" type="text" placeholder="例：4,000円" value="' + escapeAttribute(item.amount || '') + '">' +
+
+        '<label for="settlementStatus-' + escapeAttribute(participantId) + '">支払状況</label>' +
+        '<select id="settlementStatus-' + escapeAttribute(participantId) + '">' +
+          renderSettlementStatusOptions(item.paymentStatus || '未設定') +
+        '</select>' +
+
+        '<label for="settlementMethod-' + escapeAttribute(participantId) + '">支払方法</label>' +
+        '<input id="settlementMethod-' + escapeAttribute(participantId) + '" type="text" placeholder="例：現金、PayPay、銀行振込" value="' + escapeAttribute(item.paymentMethod || '') + '">' +
+
+        '<label for="settlementNote-' + escapeAttribute(participantId) + '">メモ</label>' +
+        '<input id="settlementNote-' + escapeAttribute(participantId) + '" type="text" placeholder="例：端数調整済み" value="' + escapeAttribute(item.note || '') + '">' +
+
+        '<div class="list-item-meta">最終更新：' + escapeHtml(item.updatedAt || '未更新') + '</div>' +
+      '</div>';
+  });
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>幹事用：精算情報を編集する</h3>' +
+      '<p class="lead">参加者ごとに支払金額・支払状況・支払方法を設定できます。</p>' +
+      '<div class="list">' + rowsHtml + '</div>' +
+      '<div class="button-row">' +
+        '<button type="button" onclick="saveSettlements()">精算情報を保存する</button>' +
+      '</div>' +
+    '</div>';
+}
+
+
+function renderSettlementStatusOptions(selected) {
+  const options = ['未設定', '未払い', '支払済み', '一部支払', '支払不要'];
+  let html = '';
+
+  options.forEach(function (option) {
+    html += '<option value="' + escapeAttribute(option) + '"' + (option === selected ? ' selected' : '') + '>' + escapeHtml(option) + '</option>';
+  });
+
+  return html;
+}
+
+
+function saveSettlements() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  if (!currentAdminKey) {
+    showMessage('管理キーを確認してください。', 'error');
+    return;
+  }
+
+  if (!currentSettlementSummary || !currentSettlementSummary.items) {
+    showMessage('精算対象者が読み込まれていません。', 'error');
+    return;
+  }
+
+  const rows = currentSettlementSummary.items.map(function (item) {
+    const participantId = String(item.participantId || '');
+
+    return {
+      participantId: participantId,
+      amount: getValue('settlementAmount-' + participantId),
+      paymentStatus: getValue('settlementStatus-' + participantId),
+      paymentMethod: getValue('settlementMethod-' + participantId),
+      note: getValue('settlementNote-' + participantId)
+    };
+  });
+
+  callServer('saveSettlementRows', {
+    eventId: currentEventData.event.eventId,
+    adminKey: currentAdminKey,
+    rows: rows
+  })
+    .then(function (result) {
+      if (!result || !result.ok) {
+        showMessage('精算情報の保存に失敗しました。', 'error');
+        return;
+      }
+
+      currentSettlementSummary = result.summary;
+      renderSettlementSummary(result.summary);
+      renderSettlementAdminForm(result.summary);
+
+      showMessage(result.message || '精算情報を保存しました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderAdminTab(data) {
+  const area = document.getElementById('adminContent');
+  if (!area) return;
+
+  if (!currentAdminKey) {
+    area.innerHTML =
+      '<div class="result-box">' +
+        '<h3>管理キーを入力</h3>' +
+        '<p class="lead">イベント作成時に発行された管理キーを入力すると、決定事項を登録・更新できます。</p>' +
+        '<label for="adminKeyInput">管理キー</label>' +
+        '<input id="adminKeyInput" type="text" placeholder="ADM-XXXXXXXXXXXX">' +
+        '<div class="button-row">' +
+          '<button type="button" onclick="unlockAdmin()">幹事管理を開く</button>' +
+        '</div>' +
+      '</div>';
+    return;
+  }
+
+  renderAdminDecisionForm(data);
+}
+
+
+function unlockAdmin() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  const adminKey = getValue('adminKeyInput');
+
+  if (!adminKey) {
+    showMessage('管理キーを入力してください。', 'error');
+    return;
+  }
+
+  callServer('verifyAdminKey', currentEventData.event.eventId, adminKey)
+    .then(function (result) {
+      if (!result || !result.ok) {
+        showMessage(result && result.message ? result.message : '管理キーが一致しません。', 'error');
+        return;
+      }
+
+      currentAdminKey = adminKey;
+      renderAdminDecisionForm(currentEventData);
+      renderSettlementAdminArea(currentSettlementSummary);
+      showMessage('幹事管理を開きました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function renderAdminDecisionForm(data) {
+  const area = document.getElementById('adminContent');
+  if (!area) return;
+
+  const event = data.event;
+  const slots = data.slots || [];
+  const stationOptions = data.stationOptions || [];
+
+  let slotOptionsHtml = '<option value="">手入力する</option>';
+
+  slots.forEach(function (slot) {
+    const label = formatDateForDisplay(slot.date || '') + ' ' + (slot.startTime || '') + '〜' + (slot.endTime || '');
+    slotOptionsHtml += '<option value="' + escapeAttribute(slot.slotId) + '">' + escapeHtml(label) + '</option>';
+  });
+
+  let stationOptionsHtml = '<option value="">未選択</option>';
+
+  stationOptions.forEach(function (option) {
+    const station = option.name || option.station || '';
+    stationOptionsHtml += '<option value="' + escapeAttribute(station) + '">' + escapeHtml(station) + '</option>';
+  });
+
+  area.innerHTML =
+    '<div class="result-box">' +
+      '<h3>決定事項を登録・更新</h3>' +
+      '<p class="lead">参加者に周知する確定情報を登録します。</p>' +
+
+      '<label for="adminFinalSlotId">確定日程</label>' +
+      '<select id="adminFinalSlotId">' + slotOptionsHtml + '</select>' +
+
+      '<label for="adminFinalDateTime">確定日時を手入力する場合</label>' +
+      '<input id="adminFinalDateTime" type="text" placeholder="例：2026/7/10（金）19:00〜21:00" value="' + escapeAttribute(event.finalDateTime || '') + '">' +
+
+      '<label for="adminFinalStation">最寄り駅</label>' +
+      '<select id="adminFinalStation">' + stationOptionsHtml + '</select>' +
+
+      '<label for="adminFinalShopName">お店名</label>' +
+      '<input id="adminFinalShopName" type="text" placeholder="例：居酒屋あおやま" value="' + escapeAttribute(event.finalShopName || '') + '">' +
+
+      '<label for="adminFinalShopUrl">お店URL</label>' +
+      '<input id="adminFinalShopUrl" type="url" placeholder="https://example.com" value="' + escapeAttribute(event.finalShopUrl || '') + '">' +
+
+      '<label for="adminFinalMeetingPlace">集合場所</label>' +
+      '<input id="adminFinalMeetingPlace" type="text" placeholder="例：渋谷駅ハチ公前" value="' + escapeAttribute(event.finalMeetingPlace || '') + '">' +
+
+      '<label for="adminFinalFee">会費目安</label>' +
+      '<input id="adminFinalFee" type="text" placeholder="例：4,000円" value="' + escapeAttribute(event.finalFee || '') + '">' +
+
+      '<label for="adminFinalMemo">幹事メモ</label>' +
+      '<textarea id="adminFinalMemo" placeholder="例：当日は現地集合です。">' + escapeHtml(event.finalMemo || '') + '</textarea>' +
+
+      '<div class="button-row">' +
+        '<button type="button" onclick="saveFinalDecision()">決定事項を保存する</button>' +
+        '<button type="button" class="danger" onclick="clearDecision()">決定事項をクリアする</button>' +
+      '</div>' +
+    '</div>';
+}
+
+
+function saveFinalDecision() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  if (!currentAdminKey) {
+    showMessage('管理キーを確認してください。', 'error');
+    return;
+  }
+
+  const data = {
+    eventId: currentEventData.event.eventId,
+    adminKey: currentAdminKey,
+    finalSlotId: getValue('adminFinalSlotId'),
+    finalDateTime: getValue('adminFinalDateTime'),
+    finalStation: getValue('adminFinalStation'),
+    finalShopName: getValue('adminFinalShopName'),
+    finalShopUrl: getValue('adminFinalShopUrl'),
+    finalMeetingPlace: getValue('adminFinalMeetingPlace'),
+    finalFee: getValue('adminFinalFee'),
+    finalMemo: getValue('adminFinalMemo')
+  };
+
+  callServer('updateFinalDecision', data)
+    .then(function (result) {
+      if (!result || !result.ok) {
+        showMessage('決定事項の保存に失敗しました。', 'error');
+        return;
+      }
+
+      currentEventData = result.eventData;
+      renderEventPage(currentEventData);
+      switchTab('decision');
+
+      showMessage(result.message || '決定事項を保存しました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function clearDecision() {
+  if (!currentEventData || !currentEventData.event) {
+    showMessage('イベント情報が読み込まれていません。', 'error');
+    return;
+  }
+
+  if (!currentAdminKey) {
+    showMessage('管理キーを確認してください。', 'error');
+    return;
+  }
+
+  if (!confirm('決定事項をクリアしますか？')) {
+    return;
+  }
+
+  callServer('clearFinalDecision', {
+    eventId: currentEventData.event.eventId,
+    adminKey: currentAdminKey
+  })
+    .then(function (result) {
+      currentEventData = result.eventData;
+      renderEventPage(currentEventData);
+      switchTab('admin');
+
+      showMessage(result.message || '決定事項をクリアしました。', 'success');
+    })
+    .catch(function (error) {
+      showMessage(error.message || error, 'error');
+    });
+}
+
+
+function switchTab(tabName) {
+  const buttons = document.querySelectorAll('.tab-button');
+  const panels = document.querySelectorAll('.tab-panel');
+
+  buttons.forEach(function (button) {
+    button.classList.remove('active');
+  });
+
+  panels.forEach(function (panel) {
+    panel.classList.remove('active');
+  });
+
+  const targetPanel = document.getElementById('tab-' + tabName);
+
+  if (targetPanel) {
+    targetPanel.classList.add('active');
+  }
+
+  const buttonIndexMap = {
+    overview: 0,
+    schedule: 1,
+    vote: 2,
+    decision: 3,
+    settlement: 4,
+    admin: 5
+  };
+
+  const index = buttonIndexMap[tabName];
+
+  if (buttons[index]) {
+    buttons[index].classList.add('active');
+  }
+}
+
+
+function showTopView() {
+  setDisplay('topView', 'block');
+  setDisplay('eventView', 'none');
+
+  currentEventData = null;
+  currentAdminKey = '';
+  currentSettlementSummary = null;
+
+  currentParticipantEdit = {
+    participantId: '',
+    editKey: ''
+  };
+
+  renderLocalHistory();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+
+function saveLocalHistory(result) {
+  const history = getLocalHistory();
+
+  history.unshift({
+    eventId: result.eventId,
+    adminKey: result.adminKey,
+    eventName: result.eventName || result.eventId,
+    createdAt: new Date().toLocaleString('ja-JP')
+  });
+
+  const limited = history.slice(0, 20);
+  localStorage.setItem('kanpai_plus_created_events', JSON.stringify(limited));
+}
+
+
+function getLocalHistory() {
+  try {
+    const raw = localStorage.getItem('kanpai_plus_created_events');
+    return raw ? JSON.parse(raw) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+
+function renderLocalHistory() {
+  const area = document.getElementById('localHistory');
+  if (!area) return;
+
+  const history = getLocalHistory();
+
+  if (history.length === 0) {
+    area.innerHTML = '<div class="empty">この端末で作成したイベントはまだありません。</div>';
+    return;
+  }
+
+  let html = '';
+
+  history.forEach(function (item) {
+    html +=
+      '<div class="local-history-item">' +
+        '<div>' +
+          '<strong>' + escapeHtml(item.eventName || item.eventId) + '</strong>' +
+          '<div class="small">イベントID：' + escapeHtml(item.eventId) + '</div>' +
+          '<div class="small">作成日時：' + escapeHtml(item.createdAt || '') + '</div>' +
+        '</div>' +
+        '<div class="button-row" style="margin-top:0;">' +
+          '<button type="button" class="secondary" onclick="loadEvent(\'' + escapeForJs(item.eventId) + '\')">開く</button>' +
+          '<button type="button" class="ghost" onclick="copyText(\'' + escapeForJs(item.adminKey) + '\')">管理キーをコピー</button>' +
+        '</div>' +
+      '</div>';
+  });
+
+  area.innerHTML = html;
+}
+
+
+function formatDateForDisplay(dateText) {
+  if (!dateText) return '';
+
+  const date = new Date(String(dateText) + 'T00:00:00');
+
+  if (isNaN(date.getTime())) {
+    return dateText;
+  }
+
+  const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
+
+  return date.getFullYear() + '/' +
+    (date.getMonth() + 1) + '/' +
+    date.getDate() + '（' +
+    weekdays[date.getDay()] + '）';
+}
+
+
+function getValue(id) {
+  const element = document.getElementById(id);
+  return element ? element.value.trim() : '';
+}
+
+
+function setValue(id, value) {
+  const element = document.getElementById(id);
+
+  if (element) {
+    element.value = value || '';
+  }
+}
+
+
+function setText(id, value) {
+  const element = document.getElementById(id);
+
+  if (element) {
+    element.textContent = value || '';
+  }
+}
+
+
+function setHtml(id, value) {
+  const element = document.getElementById(id);
+
+  if (element) {
+    element.innerHTML = value || '';
+  }
+}
+
+
+function setDisplay(id, value) {
+  const element = document.getElementById(id);
+
+  if (element) {
+    element.style.display = value;
+  }
+}
+
+
+function showMessage(message, type) {
+  const area = document.getElementById('messageArea');
+
+  if (!area) return;
+
+  area.textContent = message;
+  area.className = 'message show ' + (type || 'info');
+
+  if (type === 'success') {
+    setTimeout(function () {
+      hideMessage();
+    }, 3500);
+  }
+}
+
+
+function hideMessage() {
+  const area = document.getElementById('messageArea');
+
+  if (!area) return;
+
+  area.className = 'message';
+  area.textContent = '';
+}
+
+
+function showLoading(show) {
+  const loading = document.getElementById('loading');
+
+  if (loading) {
+    loading.classList.toggle('show', Boolean(show));
+  }
+}
+
+
+function copyText(text) {
+  if (!text) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(function () {
+        showMessage('コピーしました。', 'success');
+      })
+      .catch(function () {
+        fallbackCopyText(text);
+      });
+  } else {
+    fallbackCopyText(text);
+  }
+}
+
+
+function fallbackCopyText(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    document.execCommand('copy');
+    showMessage('コピーしました。', 'success');
+  } catch (error) {
+    showMessage('コピーに失敗しました。手動でコピーしてください。', 'error');
+  }
+
+  document.body.removeChild(textarea);
+}
+
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+
+function escapeAttribute(value) {
+  return escapeHtml(value);
+}
+
+
+function escapeForJs(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replaceAll('\\', '\\\\')
+    .replaceAll("'", "\\'")
+    .replaceAll('"', '\\"')
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '');
+}
+</script>
